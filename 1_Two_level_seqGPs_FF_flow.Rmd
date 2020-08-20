@@ -1,0 +1,668 @@
+---
+title: "Two-level isotropic sequential GP modelling (with FF) -- flow"
+output: html_notebook
+---
+
+
+```{r}
+library(data.table)
+library(mvtnorm)
+library(reshape2)
+library(ggplot2)
+library(crayon)
+library(scoringRules)
+library(analogue)
+```
+
+```{r}
+current_directory = getwd()
+descriptor_filename = "/df_intra_sb.txt"
+energy_filename = "/oxalic_acid_ff_minima_energies.txt"
+save_image_directory = getwd()
+
+alpha_structure_id = "1003019125"
+beta_structure_id = "10030141758"
+```
+
+```{r}
+energies = read.table(paste(current_directory, energy_filename, sep = ""),
+                      header = TRUE, colClasses = c("character", "numeric", "numeric", "numeric"),  
+                      col.names = c("structure_id", "ff_energy", "vasp_energy", "crystal_energy"))
+dt_energy = data.table(energies[!is.na(energies$crystal_energy),])
+structure_names = sort(unique(as.character(dt_energy$structure_id)))  ## ensuring the same order
+
+dt_energy$low = dt_energy$vasp_energy 
+dt_energy$high = dt_energy$crystal_energy 
+dt_energy$structure_id = as.character(dt_energy$structure_id)
+# sorting by structure name
+dt_energy = dt_energy[order(as.character(structure_id))]
+
+df_symmetry = data.table(read.table(paste(current_directory, descriptor_filename, sep = "")))
+df_symmetry$structure_id = as.character(df_symmetry$structure_id)
+df_symmetry = df_symmetry[structure_id %in% structure_names]
+df_symmetry = df_symmetry[order(as.character(structure_id))]            ## sorting by str_lables
+
+n_structures = length(structure_names)   
+n_atoms = max(df_symmetry$atom_id)
+
+head(df_symmetry) 
+head(dt_energy)
+```
+
+```{r}
+## Converting symmetry functions into a wide data table 
+
+col_descriptors = 4:ncol(df_symmetry)
+n_descriptors = n_atoms * length(col_descriptors)
+new_colnames = unlist(lapply(colnames(df_symmetry)[-(1:3)], paste, as.character(df_symmetry$atom_id[1:n_atoms]), sep = "_"))
+dt_structures = data.table(dt_energy) 
+
+C = matrix(nrow = 0, ncol = length(new_colnames))
+for (s in 1:n_structures) {   ## matrix-to-vector conversion goes by columns
+  C = rbind(C, as.vector(as.matrix(df_symmetry[(df_symmetry$structure_id == structure_names[s]), col_descriptors, with = FALSE])))
+}
+Dist_scaled = as.matrix(dist(C))
+dt_structures = cbind(dt_structures, C)
+colnames(dt_structures) = c(colnames(dt_structures)[1:6], new_colnames)
+dt_structures[1:20, 1:50]
+```
+
+Two "loops": the first one generates nested training sets for the PBE response, the second one -- nested training sets for the PBE0.
+
+```{r}
+source('maximin_upd.R')
+source('Linear_IsoGP_functions.R')
+source('plotting_parameters.R')
+setwd(current_directory)
+
+### Looping through nested test sets
+training_proportion_low = seq(from = 10, to = 70, by = 5)
+n_training_iter_low = length(training_proportion_low)
+list_training_sets_low = vector("list", n_training_iter_low)
+
+training_proportion_high = seq(from = 10, to = 70, by = 5)
+n_training_iter_high = length(training_proportion_high)
+list_training_sets_high = vector("list", n_training_iter_high)
+
+training_set = training_set_maximin
+
+```
+
+Determining the training and test sets -- these have been calculated, and are in the "training_sets" folder
+```{r}
+# for (i in 1:n_training_iter_low) {
+#   
+#   n_training_low = floor(training_proportion_low[n_training_iter_low-i+1]*n_structures/100)
+#   n_test_low = n_structures - n_training_low
+#   ## Choose the training set
+#   if (i == 1) {
+#     alpha_beta_idx = which(structure_names %in% c(alpha_structure_id, beta_structure_id))
+#     other_names = structure_names[-alpha_beta_idx]
+#     training_idx_low_ = training_set(n_training_low, C_scaled = as.matrix(dt_structures[-alpha_beta_idx, new_colnames, with = FALSE]))
+#     training_idx_low = which(structure_names %in% other_names[training_idx_low_])
+#     
+#     write.table(data.table("pure_PBE0_test_idx" = test_set(training_idx_low)),                 # test set that hasn't been used for training at all
+#                 file = glue::glue("{getwd()}/training_sets/pure_test_idx_{max(training_proportion_low)}.txt"))  
+#   } else {
+#     training_idx_ = training_set(n_training_low, C_scaled = as.matrix(dt_structures[-test_idx_low, new_colnames, with = FALSE])) # choosing from the subset
+#     training_idx_low = which(structure_names %in% training_names_low[training_idx_]) # matching back to the original indeces
+#   }
+#   test_idx_low = test_set(training_idx_low)
+#   training_names_low = structure_names[training_idx_low]  # available structures for next round
+#   list_training_sets_low[[i]] = training_idx_low
+#   
+#   # Record the lower training indeces 
+#   write.table(data.table("training_idx_low" = training_idx_low), 
+#             file = glue::glue("{getwd()}/training_sets/tr_idx_low_{training_proportion_low[n_training_iter_low-i+1]}.txt"))
+# 
+#   ############################################################      
+#   for (j in 1:n_training_iter_high) {
+#     
+#     n_training_high = floor(training_proportion_high[n_training_iter_high-j+1]*n_training_low/100) 
+#     n_test_high = n_structures - n_training_high
+#     ## Choose the training set
+#     if (j == 1) {
+#       training_idx_high_ = training_set_maximin(n_training_high, C_scaled = C[training_idx_low,])    # choosing from the subset
+#       training_idx_high = which(structure_names %in% training_names_low[training_idx_high_])    # matching back to the original indeces
+#       
+#       write.table(data.table("PBE0_test_idx" = test_set(training_idx_high)),                    # the "common" PBE0 test set for this training_set_low
+#                 file = glue::glue("{getwd()}/training_sets/PBE0_common_test_{training_proportion_low[n_training_iter_low-i+1]}.txt"))  
+#     } else {
+#       training_idx_high_ = training_set(n_training_high, C_scaled = as.matrix(dt_structures[-test_idx_high, new_colnames, with = FALSE])) # choosing from the subset
+#       training_idx_high = which(structure_names %in% training_names_high[training_idx_high_]) # matching back to the original indeces
+#     }
+#     test_idx_high = test_set(training_idx_high)
+#     training_names_high = structure_names[training_idx_high]  # available structures for next round
+#     list_training_sets_high[[j]] = training_idx_high
+#     
+#     # Record the high training indeces 
+#     write.table(data.table("training_idx_high" = training_idx_high), 
+#             file = glue::glue("{getwd()}/training_sets/tr_idx_high_{training_proportion_low[n_training_iter_low-i+1]}_
+#                               {training_proportion_high[n_training_iter_high-j+1]}.txt"))
+#   }
+#   #######################################################    
+#   
+# }
+```
+
+The following loops contain the modelling and producing predicitons and plots
+
+
+I. Fitting the isotropic GP with FF mean for the Lower level accuracy response (Bayesian)
+```{r}
+## Setting (more or less informative) common prior hyperparameters
+# Prior on the between-stricture variance: sigma2 ~ IG(shape=alpha, scale=gamma)
+alpha = 1.0
+gamma = 1.0
+# Prior on the intercept and linear term: mu ~ N(beta_0, sigma2*R)
+beta_0 = c(0.0, 0.5) 
+R = diag(1.0, 2)
+# phi ~ IG (shape=a, scale=b)
+a = 2.0
+b = 1.0
+## Tau2 = 10^(-5)
+tau2 = 10^(-5)
+
+## Specifying the distance matrix
+D_all= as.matrix(dist(dt_structures[, new_colnames, with = FALSE]))  
+```
+
+
+```{r}
+# Tracking errors
+mae_low_track = rmse_low_track = rep(0, n_training_iter_low)
+
+# list of PBE predictions and SDs for all points (to be used in PBE0 modelling)
+pred_all_PBE = vector("list", n_training_iter_low)   
+pred_all_PBE_sd = vector("list", n_training_iter_low)  
+
+# data frames to keep track of predictions, rank predictions, etc.
+df_pred_PBE = vector("list", n_training_iter_low)
+
+df_pred_PBE0_pure = vector("list", n_training_iter_low * n_training_iter_high)  # predictions on pure test set
+df_pred_PBE0 = vector("list", n_training_iter_low * n_training_iter_high)       # predictions on common test sets within low levels
+
+# correlation between ranks
+PBE0_ff_true_rank_corr = PBE0_pred_true_rank_corr = rep(0, n_training_iter_low * n_training_iter_high)
+PBE_ff_true_rank_corr = PBE_pred_true_rank_corr= rep(0, n_training_iter_low)
+
+# data frames to keep track of errors
+df_error_pure = data.table(expand.grid(training_proportion_low[n_training_iter_low :1], training_proportion_high[n_training_iter_high :1]))
+names(df_error_pure) = c("high", "low")   # MAE and RMSE track on pure test set
+df_error_pure$seq_mae = df_error_pure$seq_rmse = 0.0
+df_error = df_error_pure                  # MAE and RMSE track on "common" test sets within low levels
+
+# plotting uncertainty -- coefficient
+sd_coef = 2
+```
+
+```{r}
+pure_test_idx = sort(read.table(glue::glue("{getwd()}/training_sets/pure_test_idx_{max(training_proportion_low)}.txt"))$pure_PBE0_test_idx)
+
+for (low_iter in 1:n_training_iter_low) {
+  
+  ## Specifying the response
+  dt_energy$energy = dt_energy$low
+  ## Reading training and test indices
+  training_percentage = training_proportion_low[n_training_iter_low - low_iter + 1] 
+  training_idx = sort(read.table(glue::glue("{getwd()}/training_sets/tr_idx_low_{training_percentage}.txt"))$training_idx_low)
+  test_idx = sort(read.table(glue::glue("{getwd()}/training_sets/pure_test_idx_{max(training_proportion_low)}.txt"))$pure_PBE0_test_idx)
+  n_training = length(training_idx)
+  n_test = length(test_idx)
+
+  # Specifying linear part for PBE modelling (ie FF) - training and test
+  linear_training = dt_energy[training_idx, ff_energy]
+  linear_test = dt_energy[test_idx, ff_energy]
+  
+  # Optimising the posterior for phi
+  phi_opt = phi_iso_optim()
+  phi_post = phi_opt$phi_post   
+  
+  ## Prediction
+  y_pred_mean = mu_y(phi_post)
+  y_pred_sd = sqrt(diag(Sigma_y(phi_post))*as.numeric(gamma_(phi_post))/alpha_(n_training))
+  y_true = as.numeric(dt_energy[test_idx, energy])
+
+  ## Tracking MAE and RMSE
+  mae_low_track[low_iter] = mean(abs(dt_energy[test_idx, energy] - y_pred_mean))
+  rmse_low_track[low_iter] = get_pred_rmse(y_true, y_pred_mean)
+
+  ## Tracking predicitons and errors
+  df_pred_PBE[[low_iter]] = data.frame("structure_id" = dt_structures[test_idx, structure_id],
+                      "y_true" = as.numeric(dt_energy[test_idx, energy]),
+                      "y_pred" = y_pred_mean,
+                      "y_sd" = y_pred_sd,
+                      "y_pred_min" = y_pred_mean - sd_coef*y_pred_sd,
+                      "y_pred_max" = y_pred_mean + sd_coef*y_pred_sd,
+                      "min_dist" = apply(D_all[test_idx, training_idx], 1, min))
+  
+  ## Looking at ranks: true, predicted and ff
+  df_pred_PBE[[low_iter]]$true_rank = rank(df_pred_PBE[[low_iter]]$y_true)
+  df_pred_PBE[[low_iter]]$pred_rank = rank(df_pred_PBE[[low_iter]]$y_pred)
+  df_pred_PBE[[low_iter]]$ff_rank = rank(dt_energy$ff_energy[pure_test_idx])
+ 
+  # Geting predictions for PBE for all structures
+  test_idx = 1:n_structures; n_test = n_structures
+  linear_test = dt_energy[test_idx, ff_energy]
+  
+  pred_all_PBE[[low_iter]] = mu_y(phi_post)     # the function uses test_idx and n_test
+  pred_all_PBE_sd[[low_iter]] = sqrt(diag(Sigma_y(phi_post))*as.numeric(gamma_(phi_post))/alpha_(n_training))
+  
+  # !! Renaming the indeces at lower level -- before modelling the higher level
+  training_idx_low = training_idx
+  n_training_low = length(training_idx_low) #n_training
+  training_names_low = structure_names[training_idx_low]
+
+  ## II. Modelling PBE0 with the trend parameters including PBE
+  
+  for (high_iter in 1:n_training_iter_high) {
+    
+    ## Specifying the response
+    dt_energy$energy = dt_energy$high
+    
+    ## Reading training and test indices
+    training_proportion = training_proportion_high[n_training_iter_high - high_iter + 1] 
+    training_idx = sort(read.table(glue::glue("{getwd()}/training_sets/tr_idx_high_{training_proportion_low[n_training_iter_low-low_iter+1]}_
+                                              {training_proportion_high[n_training_iter_high-high_iter+1]}.txt"))$training_idx_high)
+    n_training = length(training_idx)
+    
+    # Test idx -- the common one for the current training low set
+    test_idx = sort(read.table(glue::glue("{getwd()}/training_sets/PBE0_common_test_{training_proportion_low[n_training_iter_low-low_iter+1]}.txt"))$PBE0_test_idx)
+    n_test = length(test_idx)
+
+    # Specifying linear part - training and test
+    linear_training = pred_all_PBE[[low_iter]][training_idx]
+    linear_test = pred_all_PBE[[low_iter]][test_idx]                
+
+    # Optimising the posterior for phi_d
+    phi_opt = phi_iso_optim()
+    phi_post = phi_opt$phi_post
+
+    current_iteration = n_training_iter_high*(low_iter-1) + high_iter
+
+    ## Prediction. MAE
+    y_pred_mean = mu_y(phi_post)
+    y_pred_var = y_pred_var_high(phi_post, low_variance = (pred_all_PBE_sd[[low_iter]][test_idx])^2)
+    y_pred_sd = y_pred_sd_high(y_pred_var)
+    y_true = as.numeric(dt_energy[test_idx, energy])
+
+    df_pred_PBE0[[current_iteration]] = data.frame("structure_id" = dt_structures[test_idx, structure_id],
+                      "y_true" = as.numeric(dt_energy[test_idx, energy]),
+                      "y_pred" = y_pred_mean,
+                      "y_sd" = y_pred_sd,
+                      "y_pred_min" = y_pred_mean - sd_coef*y_pred_sd,
+                      "y_pred_max" = y_pred_mean + sd_coef*y_pred_sd,
+                      "min_dist" = apply(D_all[test_idx, training_idx], 1, min))
+
+    df_error$seq_mae[current_iteration] = mean(abs(dt_energy[test_idx, energy] - y_pred_mean))
+    df_error$seq_rmse[current_iteration] = get_pred_rmse(y_true, y_pred_mean)
+    
+    ##########################################
+    ###### Looking at PBE0 predictions at pure_test_set only
+    ##########################################
+    
+    test_idx = sort(pure_test_idx)
+    n_test = length(test_idx)
+    linear_test = pred_all_PBE[[low_iter]][test_idx]
+    
+    ## Prediction. MAE
+    y_pred_mean = mu_y(phi_post)
+    y_pred_var = y_pred_var_high(phi_post, low_variance = (pred_all_PBE_sd[[low_iter]][test_idx])^2)
+    y_pred_sd = y_pred_sd_high(y_pred_var)
+    y_true = as.numeric(dt_energy[test_idx, energy])
+    
+    df_pred_PBE0_pure[[current_iteration]] = data.frame("structure_id" = dt_structures[test_idx, structure_id],
+                      "y_true" = as.numeric(dt_energy[test_idx, energy]),
+                      "y_pred" = y_pred_mean,
+                      "y_sd" = y_pred_sd,
+                      "y_pred_min" = y_pred_mean - sd_coef*y_pred_sd,
+                      "y_pred_max" = y_pred_mean + sd_coef*y_pred_sd,
+                      "min_dist" = apply(D_all[test_idx, training_idx], 1, min))
+      
+    df_error_pure$seq_mae[current_iteration] = mean(abs(dt_energy[test_idx, energy] - y_pred_mean))
+    df_error_pure$seq_rmse[current_iteration] = get_pred_rmse(y_true, y_pred_mean)
+    
+    ## Looking at ranks: true, predicted and ff
+    df_pred_PBE0_pure[[current_iteration]]$true_rank = rank(df_pred_PBE0_pure[[current_iteration]]$y_true)
+    df_pred_PBE0_pure[[current_iteration]]$pred_rank = rank(df_pred_PBE0_pure[[current_iteration]]$y_pred)
+    df_pred_PBE0_pure[[current_iteration]]$ff_rank = rank(dt_energy$ff_energy[test_idx])
+    
+    PBE0_ff_true_rank_corr[current_iteration] = cor(df_pred_PBE0_pure[[current_iteration]]$ff_rank, df_pred_PBE0_pure[[current_iteration]]$true_rank,
+                                                    method = "spearman")
+    PBE0_pred_true_rank_corr[current_iteration] = cor(df_pred_PBE0_pure[[current_iteration]]$pred_rank, df_pred_PBE0_pure[[current_iteration]]$true_rank,
+                                                    method = "spearman")
+      
+  }
+
+}
+
+```
+
+Plotting everything
+
+```{r}
+for (low_iter in 1:n_training_iter_low) {
+  training_percentage = training_proportion_low[n_training_iter_low - low_iter + 1] 
+  
+   ## Plotting predictions and true values for PBE, without error bars, with alpha and beta
+  
+  ggplot(data = df_pred_PBE[[low_iter]] , aes(x = y_true)) +
+    geom_abline(colour = abline_colour) +
+    geom_point(aes(y = y_pred), colour = pred_point_colour, pch = pred_point_type, size = pred_point_size) +
+    geom_text(aes(y = y_pred, label = ifelse(structure_id == alpha_structure_id, "alpha", '')), hjust=1.5, vjust=1, parse = T, 
+              colour = label_colour, size = label_text_size) +
+    geom_text(aes(y = y_pred, label = ifelse(structure_id == beta_structure_id, "beta", '')), hjust=1.5, vjust=1, parse = T, 
+              colour = label_colour, size = label_text_size) +
+    ggtitle(glue::glue("Predicted PBE. {training_percentage}% training set. MAE = {round(mae_low_track[low_iter], digits = 4)}")) +
+    ylab(pred_ylab) + xlab(true_xlab) +
+    theme_minimal() + theme(axis.title = element_text(size = axis_title_size),
+                            axis.text = element_text(size = axis_tick_label_size),
+                            legend.text = element_text(size = legend_title_size),
+                            plot.title = element_text(size = title_size, colour = PBE_colour))
+  ggsave(glue::glue("{getwd()}/results/plots/PBE_pred_true_{training_percentage}.jpeg"),
+         width = plot_width, height = plot_height)
+
+  # PBE With uncertainty bars  
+  ggplot(data = df_pred_PBE[[low_iter]] , aes(x = y_true)) +
+    geom_abline(colour = abline_colour) +
+    geom_segment(aes(xend = y_true, y = y_pred_min, yend = y_pred_max), colour = pred_point_colour, size = interval_bar_width) +
+    geom_point(aes(y = y_pred), colour = pred_point_colour, pch = pred_point_type, size = pred_point_size) +
+    geom_text(aes(y = y_pred, label = ifelse(structure_id == alpha_structure_id, "alpha", '')), hjust=1.5, vjust=1, parse = T, 
+              colour = label_colour, size = label_text_size) +
+    geom_text(aes(y = y_pred, label = ifelse(structure_id == beta_structure_id, "beta", '')), hjust=1.5, vjust=1, parse = T, 
+              colour = label_colour, size = label_text_size) +
+    ggtitle(glue::glue("Predicted PBE. {training_percentage}% training set."),
+            subtitle = glue::glue(" MAE = {round(mae_low_track[low_iter], digits = 4)}")) +
+    ylab(pred_ylab) + xlab(true_xlab) +
+        theme_minimal() + theme(axis.title = element_text(size = axis_title_size),
+                            axis.text = element_text(size = axis_tick_label_size),
+                            legend.text = element_text(size = legend_title_size),
+                            plot.title = element_text(size = title_size, colour = PBE_colour),
+                            plot.subtitle = element_text(size = subtitle_size, colour = PBE_subcolour))
+  ggsave(glue::glue("{getwd()}/results/plots/PBE_pred_true_bars_{training_percentage}.jpeg"),
+         width = plot_width, height = plot_height)
+  
+  ff_cor = PBE_ff_true_rank_corr[low_iter] = cor(df_pred_PBE[[low_iter]]$ff_rank, df_pred_PBE[[low_iter]]$true_rank,
+                                                    method = "spearman")
+  pred_cor = PBE_pred_true_rank_corr[low_iter] = cor(df_pred_PBE[[low_iter]]$pred_rank, df_pred_PBE[[low_iter]]$true_rank,
+                                                    method = "spearman") 
+  
+  cols = c( "col_ff" = ff_rank_colour, "col_pred" = pred_point_colour)
+  shapes = c("s_ff" = 17, "s_pred" = 16)
+  
+  for (high_iter in 1:n_training_iter_high) {
+    training_proportion = training_proportion_high[n_training_iter_high - high_iter + 1] 
+    current_iteration = n_training_iter_high*(low_iter-1) + high_iter
+    
+    # Predictions for PBE0 with uncertainty bars -- pure test set
+    
+    ggplot(data = df_pred_PBE0_pure[[current_iteration]] , aes(x = y_true)) +
+    geom_abline(colour = abline_colour) +
+    geom_segment(aes(xend = y_true, y = y_pred_min, yend = y_pred_max), colour = pred_point_colour, size = interval_bar_width) +
+    geom_point(aes(y = y_pred), colour = pred_point_colour, pch = pred_point_type, size = pred_point_size) +
+    geom_text(aes(y = y_pred, label = ifelse(structure_id == alpha_structure_id, "alpha", '')), hjust=1.5, vjust=1, parse = T, 
+              colour = label_colour, size = label_text_size) +
+    geom_text(aes(y = y_pred, label = ifelse(structure_id == beta_structure_id, "beta", '')), hjust=1.5, vjust=1, parse = T, 
+              colour = label_colour, size = label_text_size) +
+    ggtitle(glue::glue("Predicted PBE0. {training_percentage}%/{training_proportion}% training sets."),
+            subtitle = glue::glue("MAE = {round(df_error_pure$seq_mae[current_iteration], digits = 4)}")) +
+    ylab(pred_ylab) + xlab(true_xlab) +
+        theme_minimal() + theme(axis.title = element_text(size = axis_title_size),
+                            axis.text = element_text(size = axis_tick_label_size),
+                            legend.text = element_text(size = legend_title_size),
+                            plot.title = element_text(size = title_size, colour = PBE0_colour),
+                            plot.subtitle = element_text(size = subtitle_size, colour = PBE0_subcolour))
+    ggsave(glue::glue("{getwd()}/results/plots/PBE0_pred_true_bars_{training_percentage}_{training_proportion}.jpeg"), width = plot_width, height = plot_height)
+    
+  }
+}
+```
+
+Running single-level GPs for PBE0 (with FF) on smaller training sets -- and testing on the pure test set.
+
+```{r}
+## Single GPs on smaller training sets only
+mae_high_track = rmse_high_track = rep(0, n_training_iter_low)
+df_single_PBE0_low = list("vector", n_training_iter_low)
+df_single_PBE0_high = list("vector", n_training_iter_low*n_training_iter_high)
+
+df_single_error = data.table(expand.grid(training_proportion_low[n_training_iter_low :1], training_proportion_high[n_training_iter_high :1]))
+names(df_single_error) = c("high", "low")   # MAE and RMSE track on pure test set
+df_single_error$mae = df_single_error$rmse = df_single_error$low_mae = df_single_error$low_rmse = 0.0
+
+for (low_iter in 1:n_training_iter_low) {
+  
+  ## Specifying the response
+  dt_energy$energy = dt_energy$high
+  ## Reading training and test indices (pure test idx)
+  training_percentage = training_proportion_low[n_training_iter_low - low_iter + 1] 
+  training_idx = sort(read.table(glue::glue("{getwd()}/training_sets/tr_idx_low_{training_percentage}.txt"))$training_idx_low)
+  test_idx = sort(read.table(glue::glue("{getwd()}/training_sets/pure_test_idx_{max(training_proportion_low)}.txt"))$pure_PBE0_test_idx)
+  n_training = length(training_idx)
+  n_test = length(test_idx)
+  
+  # Specifying linear part for PBE0 modelling - training and test
+  linear_training = dt_energy[training_idx, ff_energy]
+  linear_test = dt_energy[test_idx, ff_energy]
+  
+  # Optimising the posterior for phi_c
+  phi_opt = phi_iso_optim()
+  phi_post = phi_opt$phi_post   
+  
+  ## Prediction
+  y_pred_mean = mu_y(phi_post)
+  y_pred_sd = sqrt(diag(Sigma_y(phi_post))*as.numeric(gamma_(phi_post))/alpha_(n_training))
+  y_true = as.numeric(dt_energy[test_idx, energy])
+  
+  ## Tracking MAE and RMSE
+  mae_high_track[low_iter] = mean(abs(dt_energy[test_idx, energy] - y_pred_mean))
+  rmse_high_track[low_iter] = get_pred_rmse(y_true, y_pred_mean)
+  
+  df_single_error$low_mae[df_single_error$low == as.character(training_percentage)] = mae_high_track[low_iter]     # errors when trained on a larger (low) set
+  df_single_error$low_rmse[df_single_error$low == as.character(training_percentage)] = rmse_high_track[low_iter]
+  
+  ## Tracking predictions and errors
+  df_single_PBE0_low[[low_iter]] = data.frame("structure_id" = dt_structures[test_idx, structure_id],
+                                              "y_true" = as.numeric(dt_energy[test_idx, energy]),
+                                              "y_pred" = y_pred_mean,
+                                              "y_sd" = y_pred_sd,
+                                              "y_pred_min" = y_pred_mean - sd_coef*y_pred_sd,
+                                              "y_pred_max" = y_pred_mean + sd_coef*y_pred_sd,
+                                              "min_dist" = apply(D_all[test_idx, training_idx], 1, min))
+  
+  ## Looking at ranks: true, predicted and ff
+  df_single_PBE0_low[[low_iter]]$true_rank = rank(df_single_PBE0_low[[low_iter]]$y_true)
+  df_single_PBE0_low[[low_iter]]$pred_rank = rank(df_single_PBE0_low[[low_iter]]$y_pred)
+  df_single_PBE0_low[[low_iter]]$ff_rank = rank(dt_energy$ff_energy[test_idx])
+
+  
+  for (high_iter in 1:n_training_iter_high) {
+    
+    ## Specifying the response
+    dt_energy$energy = dt_energy$high
+    
+    ## Reading training and test indices
+    training_proportion = training_proportion_high[n_training_iter_high - high_iter + 1] 
+    training_idx = sort(read.table(glue::glue("{getwd()}/training_sets/tr_idx_high_{training_proportion_low[n_training_iter_low-low_iter+1]}_
+                              {training_proportion_high[n_training_iter_high-high_iter+1]}.txt"))$training_idx_high)
+    n_training = length(training_idx)
+    current_iteration = n_training_iter_high*(low_iter-1) + high_iter
+   
+    ###### Looking at PBE0 predictions at pure_test_set only
+    test_idx = sort(read.table(glue::glue("{getwd()}/training_sets/pure_test_idx_{max(training_proportion_low)}.txt"))$pure_PBE0_test_idx)
+    n_test = length(test_idx)
+    linear_training = dt_energy[training_idx, ff_energy]
+    linear_test = dt_energy[test_idx, ff_energy]
+    
+    # Optimising the posterior for phi_c
+    phi_opt = phi_iso_optim()
+    phi_post = phi_opt$phi_post   
+    
+    ## Prediction. MAE
+    y_pred_mean = mu_y(phi_post)
+    y_pred_sd = sqrt(diag(Sigma_y(phi_post))*as.numeric(gamma_(phi_post))/alpha_(n_training))
+    y_true = as.numeric(dt_energy[test_idx, energy])
+    
+    df_single_PBE0_high[[current_iteration]] = data.frame("structure_id" = dt_structures[test_idx, structure_id],
+                                                        "y_true" = as.numeric(dt_energy[test_idx, energy]),
+                                                        "y_pred" = y_pred_mean,
+                                                        "y_sd" = y_pred_sd,
+                                                        "y_pred_min" = y_pred_mean - sd_coef*y_pred_sd,
+                                                        "y_pred_max" = y_pred_mean + sd_coef*y_pred_sd,
+                                                        "min_dist" = apply(D_all[test_idx, training_idx], 1, min))
+    
+    df_single_error$mae[current_iteration] = mean(abs(dt_energy[test_idx, energy] - y_pred_mean))
+    df_single_error$rmse[current_iteration] = get_pred_rmse(y_true, y_pred_mean)
+    
+    ## Looking at ranks: true, predicted and ff
+    df_single_PBE0_high[[current_iteration]]$true_rank = rank(df_single_PBE0_high[[current_iteration]]$y_true)
+    df_single_PBE0_high[[current_iteration]]$pred_rank = rank(df_single_PBE0_high[[current_iteration]]$y_pred)
+    df_single_PBE0_high[[current_iteration]]$ff_rank = rank(dt_energy$ff_energy[test_idx])
+    
+  }
+}
+```
+
+Plotting predicted and true values for the single GPs for PBE0 (on larger training sets)
+
+```{r}
+
+for (low_iter in 1:n_training_iter_low) {
+
+  training_percentage = training_proportion_low[n_training_iter_low - low_iter + 1] 
+  
+  ## Plotting predictions and true values, without error bars
+  ggplot(data = df_single_PBE0_low[[low_iter]], aes(x = y_true)) +
+    geom_abline(colour = abline_colour) +
+    geom_point(aes(y = y_pred), colour = pred_point_colour, pch = pred_point_type, size = pred_point_size) +
+    geom_text(aes(y = y_pred, label = ifelse(structure_id == alpha_structure_id, "alpha", '')), hjust=1.5, vjust=1, parse = T, 
+              colour = label_colour, size = label_text_size) +
+    geom_text(aes(y = y_pred, label = ifelse(structure_id == beta_structure_id, "beta", '')), hjust=1.5, vjust=1, parse = T, 
+              colour = label_colour, size = label_text_size) +
+    ggtitle(glue::glue("Predicted PBE0. {training_percentage}% training set."),
+            subtitle = glue::glue(" MAE = {round(mae_high_track[low_iter], digits = 4)}")) +
+    ylab(pred_ylab) + xlab(true_xlab) +
+        theme_minimal() + theme(axis.title = element_text(size = axis_title_size),
+                            axis.text = element_text(size = axis_tick_label_size),
+                            legend.text = element_text(size = legend_title_size),
+                            plot.title = element_text(size = title_size, colour = PBE0_colour),
+                            plot.subtitle = element_text(size = subtitle_size, colour = PBE0_subcolour))
+  ggsave(glue::glue("{getwd()}/results/plots/PBE0_pred_true_{training_percentage}.jpeg"),
+        width = plot_width, height = plot_height)
+  
+  # With uncertainty bars  
+  ggplot(data = df_single_PBE0_low[[low_iter]] , aes(x = y_true)) +
+    geom_abline(colour = abline_colour) +
+    geom_segment(aes(xend = y_true, y = y_pred_min, yend = y_pred_max), colour = pred_point_colour, size = interval_bar_width) +
+    geom_point(aes(y = y_pred), colour = pred_point_colour, pch = pred_point_type, size = pred_point_size) +
+    geom_text(aes(y = y_pred, label = ifelse(structure_id == alpha_structure_id, "alpha", '')), hjust=1.5, vjust=1, parse = T, 
+              colour = label_colour, size = label_text_size) +
+    geom_text(aes(y = y_pred, label = ifelse(structure_id == beta_structure_id, "beta", '')), hjust=1.5, vjust=1, parse = T, 
+              colour = label_colour, size = label_text_size) +
+    ggtitle(glue::glue("Predicted PBE0. {training_percentage}% training set."),
+            subtitle = glue::glue(" MAE = {round(mae_high_track[low_iter], digits = 4)}")) +
+    ylab(pred_ylab) + xlab(true_xlab) +
+        theme_minimal() + theme(axis.title = element_text(size = axis_title_size),
+                            axis.text = element_text(size = axis_tick_label_size),
+                            legend.text = element_text(size = legend_title_size),
+                            plot.title = element_text(size = title_size, colour = PBE0_colour),
+                            plot.subtitle = element_text(size = subtitle_size, colour = PBE0_subcolour))
+  ggsave(glue::glue("{getwd()}/results/plots/PBE0_pred_true_bars_{training_percentage}.jpeg"), width = plot_width, height = plot_height)
+ 
+######################################################################
+
+  
+  for (high_iter in 1:n_training_iter_high) {
+    
+    training_proportion = training_proportion_high[n_training_iter_high - high_iter + 1] 
+    current_iteration = n_training_iter_high*(low_iter-1) + high_iter
+    
+      # Predictions with uncertainty bars -- pure test set
+    
+    ggplot(data = df_single_PBE0_high[[current_iteration]], aes(x = y_true)) +
+    geom_abline(colour = abline_colour) +
+    geom_segment(aes(xend = y_true, y = y_pred_min, yend = y_pred_max), colour = pred_point_colour, size = interval_bar_width) +
+    geom_point(aes(y = y_pred), colour = pred_point_colour, pch = pred_point_type, size = pred_point_size) +
+    geom_text(aes(y = y_pred, label = ifelse(structure_id == alpha_structure_id, "alpha", '')), hjust=1.5, vjust=1, parse = T, 
+              colour = label_colour, size = label_text_size) +
+    geom_text(aes(y = y_pred, label = ifelse(structure_id == beta_structure_id, "beta", '')), hjust=1.5, vjust=1, parse = T, 
+              colour = label_colour, size = label_text_size) +
+    ggtitle(glue::glue("Predicted PBE0. {training_percentage}%*{training_proportion}% training sets."),
+            subtitle = glue::glue(" MAE = {round(df_single_error$mae[current_iteration], digits = 4)}")) +
+    ylab(pred_ylab) + xlab(true_xlab) +
+        theme_minimal() + theme(axis.title = element_text(size = axis_title_size),
+                            axis.text = element_text(size = axis_tick_label_size),
+                            legend.text = element_text(size = legend_title_size),
+                            plot.title = element_text(size = title_size, colour = PBE0_colour),
+                            plot.subtitle = element_text(size = subtitle_size, colour = PBE0_subcolour))
+    ggsave(glue::glue("{getwd()}/results/plots/PBE0_single_pred_true_bars_{training_percentage}_{training_proportion}.jpeg"), width = plot_width, height = plot_height)
+    
+      }
+}
+
+```
+
+```{r}
+## Calculate scores (CRPS)
+
+PBE0_scores = read.csv(text = "fraction_PBE, fraction_PBE0, score")  # empty df
+
+for (low_iter in 1:n_training_iter_low) {
+  
+  training_percentage = training_proportion_low[n_training_iter_low - low_iter + 1]
+  n_training_low = floor(training_percentage*n_structures/100)
+  
+  for (high_iter in 1:n_training_iter_high) {
+    
+    training_proportion = training_proportion_high[n_training_iter_high - high_iter + 1] 
+    current_iteration = n_training_iter_high*(low_iter-1) + high_iter  
+    n_training = floor(training_proportion*n_training_low/100)
+
+    df_current = df_pred_PBE0_pure[[current_iteration]]
+    
+    y_pred_var = (df_current$y_sd)^2
+    scale_pars = (y_pred_var)*(alpha_(n_training) - 1)/alpha_(n_training)
+
+    df_current$score = crps_t(y = df_current$y_true, df = 2*alpha_(n_training),
+                   location = df_current$y_pred, scale = scale_pars)
+    
+    mean_score = mean(df_current$score)
+    PBE0_scores[current_iteration, ] = c(training_percentage, training_proportion, mean_score)
+  }
+
+}
+
+write.table(PBE0_scores, glue::glue("{getwd()}/results/OA_PBE0_scores.txt"), sep = "\t")
+```
+
+
+Saving the RData
+```{r}
+save.image(glue::glue("{getwd()}/results/OA_seqGP_output.RData"))
+```
+
+
+```{r}
+## PCA of descriptors
+n_col = ncol(dt_structures)
+
+oa_pca = prcomp(dt_structures[, 5:n_col], center = TRUE)
+summary(oa_pca$sdev)
+
+oa.cov = cov(dt_structures[, 5:n_col])
+oa.eigen.sum = sum(diag(oa.cov))
+
+oa.eigen = eigen(oa.cov)
+oa.eigen$vectors[,1]
+
+for (s in oa.eigen$values) {
+  print(s / oa.eigen.sum)
+}
+
+dt_eigen = data.table("Eigenvalue" = oa.eigen$values)
+dt_eigen$molecule = "Oxalic Acid"
+plot(oa.eigen$values[1:10], xlab = 'Eigenvalue Number', ylab = 'Eigenvalue Size', main = 'PCA of symmetry functions (OA)')
+lines(oa.eigen$values[1:10])
+
+write.table(oa.eigen$values[1:15], glue::glue("{getwd()}/OA_SF_eigenvalues.txt"))
+```

@@ -1,0 +1,275 @@
+---
+title: "Ranking predictions"
+output: html_notebook
+---
+
+1. Simulate from the predictive distributions, calculate ranks -- get the "grouping"
+```{r}
+library(mvtnorm)
+library(data.table)
+library(reshape2)
+library(ggplot2)
+library(rankdist)
+```
+
+Load the data from the sequential GPR modelling
+```{r}
+load(glue::glue("{getwd()}/results/seqGP_output.RData"))
+```
+
+Choosing the model: e.g. 30/30 corresponds to iterations 9/9
+```{r}
+low_iter = 7
+high_iter = 13
+training_percentage = training_proportion_low[n_training_iter_low - low_iter + 1]
+training_percentage
+
+training_proportion = training_proportion_high[n_training_iter_high - high_iter + 1] 
+training_proportion
+current_iteration = n_training_iter_high*(low_iter-1) + high_iter  
+current_iteration
+
+n_training_low = floor(training_percentage*n_structures/100)
+n_training = floor(training_proportion*n_training_low/100)
+
+df_current = df_pred_PBE0_pure[[current_iteration]]
+```
+
+```{r}
+# Sampling 
+n_sample = 10^5
+
+y_pred_var = (df_current$y_sd)^2
+scale_matrix = diag((y_pred_var)*(alpha_(n_training) - 1)/alpha_(n_training))  # posterior scale matrix for (multivariate) t-distribution
+
+y_pred_sample = mvtnorm::rmvt(n = n_sample, sigma = scale_matrix, df = 2*alpha_(n_training),
+                              delta = df_current$y_pred, type = "shifted")
+
+## Ranks of the samples: column of n_sample rows per each test structure (n_test columns)
+y_rank_sample = t(apply(y_pred_sample, MARGIN = 1, FUN = rank))  
+
+## Order -- by true rank
+ord = order(x = as.numeric(df_current$true_rank))
+y_rank_sample_ordered = y_rank_sample[,ord]
+
+## Plot them
+y_rank = data.table(y_rank_sample_ordered)
+#boxplot(y_rank, use.cols = TRUE, range = 0.0)
+```
+
+```{r}
+abline_colour = "#999999"     # colour of the "x=y" line
+pred_point_colour = "gray44"
+pred_point_size = 3
+pred_point_type = 4           # 4 - cross
+label_colour = "red4"      # colour of alpha and beta
+label_text_size = 5.5           # size of alpha and beta
+
+axis_title_size = 24
+axis_title_family = "sans"
+axis_text_family = "sans"
+strip_font_family = "sans"
+axis_text_size = 16
+ticks_length = -1.5
+legend_title_size = 18
+
+point_shape = 22         #square, for heatmaps
+point_alpha = 0.7
+
+plot_width = 6
+plot_height = 6
+```
+
+```{r}
+## Plotting
+y_rank = data.table(y_rank_sample_ordered)
+y_rank$sample_id = 1:nrow(y_rank)
+
+y_rank = reshape2::melt(y_rank, id.vars = c("sample_id"), measure.vars = as.character(colnames(y_rank)[1:n_test]))
+y_rank$true_rank = as.factor(as.numeric(gsub("V", "", y_rank$variable)))
+
+head(y_rank)
+```
+
+```{r}
+# Save the data
+write.csv(y_rank, file = glue::glue("{getwd()}/results/OA_sampled_ranks_40_10.csv"))
+```
+
+```{r}
+greeks=c(alpha='\u03b1', tau='\u03c4', sigma='\u03c3', beta='\u03b2', gamma='\u03b3')
+```
+
+Plot posterior probabilities
+```{r}
+y_rank_count = dcast(y_rank, variable ~ value)
+y_rank_count = melt(y_rank_count, id.vars = c("variable"))
+names(y_rank_count) = c("structure", "rank", "count")
+y_rank_count$prob = y_rank_count$count/n_sample
+y_rank_count$rank = as.numeric(y_rank_count$rank)
+
+y_rank_count = data.table(y_rank_count)
+y_rank_count[structure == "V1", structure := greeks['alpha']]
+y_rank_count[structure == "V2", structure := greeks['beta']]
+y_rank_count[structure == "V3", structure := "Rank 3 structure"]
+y_rank_count[structure == "V4", structure := "Rank 4 structure"]
+y_rank_count[structure == "V5", structure := "Rank 5 structure"]
+y_rank_count[structure == "V6", structure := "Rank 6 structure"]
+
+y_rank_count
+```
+
+```{r}
+# Save the data
+
+write.csv(y_rank_count, file = glue::glue("{getwd()}/OA_rank_probs_40_10.csv"))
+```
+
+```{r}
+theme_facet = theme(aspect.ratio=1, panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        axis.line = element_line(colour = "black"), 
+        panel.border = element_rect(colour = "black", fill = "NA", size = 2.0),
+        axis.text.x = element_text(size = axis_text_size, family = axis_text_family, colour = "black",
+                                   margin = unit(c(t = 3.0, r = 0, b = 2.5, l = 0), "mm")),
+        # adjust X- and Y-axis title
+        axis.title.y = element_text(family = axis_title_family, size = axis_title_size), 
+        axis.title.x = element_text(family = axis_title_family, size = axis_title_size),
+        # adjust Y-axis labels
+        axis.text.y.left = element_text(size = axis_text_size, family = axis_text_family, colour = "black",
+                                   margin = unit(c(t = 0, r = 2.5, b = 0, l = 0), "mm")),
+        axis.text.y.right = element_text(size = axis_text_size, family = axis_text_family, colour = "black",
+                                   margin = unit(c(t = 0, r = 0, b = 0, l = 2.5), "mm")),
+        axis.ticks.length = unit(ticks_length, "mm"),
+        legend.position = "none",
+        strip.background = element_blank(),
+        strip.text.x = element_blank(),
+        legend.title = element_blank())
+```
+
+```{r}
+structures_to_display = c(greeks[c('alpha', 'beta')], "Rank 3 structure", "Rank 4 structure") 
+                          #"Rank 5 structure", "Rank 6 structure")
+ggplot(y_rank_count[(structure %in% structures_to_display) & (rank <= 20), ], 
+       aes(x = rank, y = prob, fill = rank)) +
+  geom_bar(stat = "identity") +
+  ylab("Probability") + xlab("Rank") +
+  scale_fill_continuous(type = "viridis") +
+  facet_wrap(~structure) + #coord_flip()
+  theme_bw() +
+  theme_facet
+
+ggsave(glue::glue("{getwd()}/results/plots/OA_rank_post_distributions_top4_40_10.jpeg"),
+         width = 6.0, height = 6.0, units = "in")
+
+```
+
+
+Kendall Tau distance - counting the number of pairwise disagreements between two ranking lists
+
+```{r}
+kend_dist = rankdist::DistanceBlock(mat = y_rank_sample_ordered, r = 1:n_test)
+norm_kend_dist = data.table("norm_dist" = kend_dist/(0.5*n_test*(n_test - 1)))
+
+hist(norm_kend_dist$norm_dist)
+summary(norm_kend_dist$norm_dist)
+```
+
+Kendall rank correlations - sample of these as well
+
+```{r}
+kend_corr = NULL
+for (i in 1:n_sample) {
+  kend_corr = c(kend_corr, cor(1:100, y_rank_sample_ordered[i, 1:100], method = "kendall"))
+}
+
+kend_corr = data.table("corr" = kend_corr)
+summary(kend_corr)
+```
+
+Sequential Kendall
+```{r}
+seq_list = seq(10, 150, by = 10)
+seq_names = c("1:10", "1:20", "1:30", "1:40", "1:50", "1:60", "1:70", "1:80", "1:90", "1:100",
+              "1:110" , "1:120" , "1:130", "1:140", "1:150")
+n_seq = length(seq_list)
+kend_seq_corr = matrix(0, ncol = n_seq, nrow = n_sample)
+
+for (s in 1:n_seq) {
+  corr_values = NULL
+    for (i in 1:n_sample) {
+    corr_values = c(corr_values, cor(1:seq_list[s], y_rank_sample_ordered[i, 1:seq_list[s]], method = "kendall"))
+    }
+  kend_seq_corr[, s] = corr_values
+}
+
+kend_seq_corr = data.table(kend_seq_corr)
+setnames(kend_seq_corr, names(kend_seq_corr), seq_names)
+
+kend_seq_corr
+
+kend_seq_corr = melt(kend_seq_corr, measure.vars = seq_names)
+setnames(kend_seq_corr, names(kend_seq_corr), c("seq_name", "corr"))
+kend_seq_corr
+```
+
+Training proportions vs the boxplots
+
+```{r}
+low_props =  c(10, 20, 20, 30, 40, seq(40, 70, by = 10))
+high_props = c(10, 10, 20, 30, 10, seq(40, 70, by = 10))
+
+series_names = c("10/10", "20/10", "20/20", "30/30", "40/10", 
+                 "40/40", "50/50", "60/60", "70/70")
+
+n_iter = length(low_props)
+
+n_sample = 10^5
+kend_series_corr = matrix(0, ncol = n_iter, nrow = n_sample)
+
+for (iter in 1:n_iter) {   # each iteration corresponds to a combination of training sets
+  
+  low_iter = n_training_iter_low - which(training_proportion_low == low_props[iter]) + 1
+  high_iter = n_training_iter_high - which(training_proportion_high == high_props[iter]) + 1
+  
+  training_percentage = training_proportion_low[n_training_iter_low - low_iter + 1]
+  training_proportion = training_proportion_high[n_training_iter_high - high_iter + 1] 
+  current_iteration = n_training_iter_high*(low_iter-1) + high_iter  
+  n_training_low = floor(training_percentage*n_structures/100)
+  n_training = floor(training_proportion*n_training_low/100)
+
+  df_current = df_pred_PBE0_pure[[current_iteration]]
+
+  # Sampling 
+  y_pred_var = (df_current$y_sd)^2
+  scale_matrix = diag((y_pred_var)*(alpha_(n_training) - 1)/alpha_(n_training))  # posterior scale matrix for (multivariate) t-distribution
+  y_pred_sample = mvtnorm::rmvt(n = n_sample, sigma = scale_matrix, df = 2*alpha_(n_training),
+                              delta = df_current$y_pred, type = "shifted")
+
+  ## Ranks of the samples: column of n_sample rows per each test structure (n_test columns)
+  y_rank_sample = t(apply(y_pred_sample, MARGIN = 1, FUN = rank))  
+  ## Order -- by true rank
+  ord = order(x = as.numeric(df_current$true_rank))
+  y_rank_sample_ordered = y_rank_sample[,ord]
+
+  kend_corr = NULL
+  for (i in 1:n_sample) {
+    kend_corr = c(kend_corr, cor(1:n_test, y_rank_sample_ordered[i,], method = "kendall"))
+  }
+  summary(kend_corr)
+  kend_series_corr[,iter] = kend_corr    # column "iter" contains a sample of correlations
+
+}
+
+kend_series_corr = data.table(kend_series_corr)
+setnames(kend_series_corr, names(kend_series_corr), series_names)
+
+kend_series_corr = melt(kend_series_corr, measure.vars = series_names)
+setnames(kend_series_corr, names(kend_series_corr), c("series_name", "corr"))
+kend_series_corr
+
+```
+
+```{r}
+save.image(glue::glue("{getwd()}/results/OA_rank_data.RData"))
+```
+

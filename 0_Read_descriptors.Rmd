@@ -1,0 +1,70 @@
+---
+title: "Read symmetry functions, save the data frames in text files"
+output: html_notebook
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r warning = FALSE}
+library(reticulate)
+library(data.table)
+```
+
+
+Obtaining descriptors -- running some python code
+```{r warning = FALSE}
+path_to_python = "/anaconda3/envs/cspy/bin/python"
+use_python(path_to_python)
+knitr::knit_engines$set(python = reticulate::eng_python)
+py_available(initialize = TRUE)
+
+```
+
+For each set of the descriptors run the python script once, save the data in .txt files
+```{r warning = FALSE}
+
+py_run_file("/CSP/python/sym_fns_descriptors.py")
+current_directory = getwd()
+
+df_intra = data.table(py$df_intra)
+df_no_intra = data.table(py$df_no_intra)
+df_intra_sr = data.table(py$df_intra_sr)
+df_no_intra_sr = data.table(py$df_no_intra_sr)
+df_intra_sa = data.table(py$df_intra_sa)
+df_no_intra_sa = data.table(py$df_no_intra_sa)
+df_intra_sb = data.table(py$df_intra_sb)
+df_no_intra_sb = data.table(py$df_no_intra_sb)
+
+N_atoms = py$n_atoms        # number of atoms per structure
+N_s = py$n_structures       # number of structures
+str_names = py$str_labels
+
+## Saving the data frames in text files
+
+write.table(df_intra, file = paste(current_directory, "df_intra.txt", sep = ""),
+            sep = "\t")
+write.table(df_no_intra, file = paste(current_directory, "df_no_intra.txt", sep = ""),
+            sep = "\t")
+write.table(df_intra_sr, file = paste(current_directory, "df_intra_sr.txt", sep = ""),
+            sep = "\t")
+write.table(df_no_intra_sr, file = paste(current_directory, "df_no_intra_sr.txt", sep = ""),
+            sep = "\t")
+write.table(df_intra_sa, file = paste(current_directory, "df_intra_sa.txt", sep = ""),
+            sep = "\t")
+write.table(df_no_intra_sa, file = paste(current_directory, "df_no_intra_sa.txt", sep = ""),
+            sep = "\t")
+write.table(df_intra_sb, file = paste(current_directory, "df_intra_sb.txt", sep = ""),
+            sep = "\t")
+write.table(df_no_intra_sb, file = paste(current_directory, "df_no_intra_sb.txt", sep = ""),
+            sep = "\t")
+
+head(df_intra_sb)
+            
+```
+
+
+
+
