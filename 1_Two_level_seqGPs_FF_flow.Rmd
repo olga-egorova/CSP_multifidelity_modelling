@@ -88,63 +88,6 @@ training_set = training_set_maximin
 
 ```
 
-Determining the training and test sets -- these have been calculated, and are in the "training_sets" folder
-```{r}
-# for (i in 1:n_training_iter_low) {
-#   
-#   n_training_low = floor(training_proportion_low[n_training_iter_low-i+1]*n_structures/100)
-#   n_test_low = n_structures - n_training_low
-#   ## Choose the training set
-#   if (i == 1) {
-#     alpha_beta_idx = which(structure_names %in% c(alpha_structure_id, beta_structure_id))
-#     other_names = structure_names[-alpha_beta_idx]
-#     training_idx_low_ = training_set(n_training_low, C_scaled = as.matrix(dt_structures[-alpha_beta_idx, new_colnames, with = FALSE]))
-#     training_idx_low = which(structure_names %in% other_names[training_idx_low_])
-#     
-#     write.table(data.table("pure_PBE0_test_idx" = test_set(training_idx_low)),                 # test set that hasn't been used for training at all
-#                 file = glue::glue("{getwd()}/training_sets/pure_test_idx_{max(training_proportion_low)}.txt"))  
-#   } else {
-#     training_idx_ = training_set(n_training_low, C_scaled = as.matrix(dt_structures[-test_idx_low, new_colnames, with = FALSE])) # choosing from the subset
-#     training_idx_low = which(structure_names %in% training_names_low[training_idx_]) # matching back to the original indeces
-#   }
-#   test_idx_low = test_set(training_idx_low)
-#   training_names_low = structure_names[training_idx_low]  # available structures for next round
-#   list_training_sets_low[[i]] = training_idx_low
-#   
-#   # Record the lower training indeces 
-#   write.table(data.table("training_idx_low" = training_idx_low), 
-#             file = glue::glue("{getwd()}/training_sets/tr_idx_low_{training_proportion_low[n_training_iter_low-i+1]}.txt"))
-# 
-#   ############################################################      
-#   for (j in 1:n_training_iter_high) {
-#     
-#     n_training_high = floor(training_proportion_high[n_training_iter_high-j+1]*n_training_low/100) 
-#     n_test_high = n_structures - n_training_high
-#     ## Choose the training set
-#     if (j == 1) {
-#       training_idx_high_ = training_set_maximin(n_training_high, C_scaled = C[training_idx_low,])    # choosing from the subset
-#       training_idx_high = which(structure_names %in% training_names_low[training_idx_high_])    # matching back to the original indeces
-#       
-#       write.table(data.table("PBE0_test_idx" = test_set(training_idx_high)),                    # the "common" PBE0 test set for this training_set_low
-#                 file = glue::glue("{getwd()}/training_sets/PBE0_common_test_{training_proportion_low[n_training_iter_low-i+1]}.txt"))  
-#     } else {
-#       training_idx_high_ = training_set(n_training_high, C_scaled = as.matrix(dt_structures[-test_idx_high, new_colnames, with = FALSE])) # choosing from the subset
-#       training_idx_high = which(structure_names %in% training_names_high[training_idx_high_]) # matching back to the original indeces
-#     }
-#     test_idx_high = test_set(training_idx_high)
-#     training_names_high = structure_names[training_idx_high]  # available structures for next round
-#     list_training_sets_high[[j]] = training_idx_high
-#     
-#     # Record the high training indeces 
-#     write.table(data.table("training_idx_high" = training_idx_high), 
-#             file = glue::glue("{getwd()}/training_sets/tr_idx_high_{training_proportion_low[n_training_iter_low-i+1]}_
-#                               {training_proportion_high[n_training_iter_high-j+1]}.txt"))
-#   }
-#   #######################################################    
-#   
-# }
-```
-
 The following loops contain the modelling and producing predicitons and plots
 
 
